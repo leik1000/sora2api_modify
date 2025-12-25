@@ -12,6 +12,7 @@ class Token(BaseModel):
     st: Optional[str] = None
     rt: Optional[str] = None
     client_id: Optional[str] = None
+    proxy_url: Optional[str] = None
     remark: Optional[str] = None
     expiry_time: Optional[datetime] = None
     is_active: bool = True

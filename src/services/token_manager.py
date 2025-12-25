@@ -643,6 +643,7 @@ class TokenManager:
                        st: Optional[str] = None,
                        rt: Optional[str] = None,
                        client_id: Optional[str] = None,
+                       proxy_url: Optional[str] = None,
                        remark: Optional[str] = None,
                        update_if_exists: bool = False,
                        image_enabled: bool = True,
@@ -656,6 +657,7 @@ class TokenManager:
             st: Session Token (optional)
             rt: Refresh Token (optional)
             client_id: Client ID (optional)
+            proxy_url: Proxy URL (optional)
             remark: Remark (optional)
             update_if_exists: If True, update existing token instead of raising error
             image_enabled: Enable image generation (default: True)
@@ -792,6 +794,7 @@ class TokenManager:
             st=st,
             rt=rt,
             client_id=client_id,
+            proxy_url=proxy_url,
             remark=remark,
             expiry_time=expiry_time,
             is_active=True,
@@ -877,12 +880,13 @@ class TokenManager:
                           st: Optional[str] = None,
                           rt: Optional[str] = None,
                           client_id: Optional[str] = None,
+                          proxy_url: Optional[str] = None,
                           remark: Optional[str] = None,
                           image_enabled: Optional[bool] = None,
                           video_enabled: Optional[bool] = None,
                           image_concurrency: Optional[int] = None,
                           video_concurrency: Optional[int] = None):
-        """Update token (AT, ST, RT, client_id, remark, image_enabled, video_enabled, concurrency limits)"""
+        """Update token (AT, ST, RT, client_id, proxy_url, remark, image_enabled, video_enabled, concurrency limits)"""
         # If token (AT) is updated, decode JWT to get new expiry time
         expiry_time = None
         if token:
@@ -892,7 +896,7 @@ class TokenManager:
             except Exception:
                 pass  # If JWT decode fails, keep expiry_time as None
 
-        await self.db.update_token(token_id, token=token, st=st, rt=rt, client_id=client_id, remark=remark, expiry_time=expiry_time,
+        await self.db.update_token(token_id, token=token, st=st, rt=rt, client_id=client_id, proxy_url=proxy_url, remark=remark, expiry_time=expiry_time,
                                    image_enabled=image_enabled, video_enabled=video_enabled,
                                    image_concurrency=image_concurrency, video_concurrency=video_concurrency)
 

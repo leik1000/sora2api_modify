@@ -117,20 +117,21 @@ class FileCache:
         
         return f"{url_hash}{ext}"
     
-    async def download_and_cache(self, url: str, media_type: str) -> str:
+    async def download_and_cache(self, url: str, media_type: str, token_id: Optional[int] = None) -> str:
         """
         Download file from URL and cache it locally
-        
+
         Args:
             url: File URL to download
             media_type: 'image' or 'video'
-            
+            token_id: Token ID for getting token-specific proxy (optional)
+
         Returns:
             Local cache filename
         """
         filename = self._generate_cache_filename(url, media_type)
         file_path = self.cache_dir / filename
-        
+
         # Check if already cached and not expired
         if file_path.exists():
             file_age = time.time() - file_path.stat().st_mtime
@@ -143,22 +144,22 @@ class FileCache:
                     file_path.unlink()
                 except Exception:
                     pass
-        
+
         # Download file
         debug_logger.log_info(f"Downloading file from: {url}")
 
         try:
-            # Get proxy if available
+            # Get proxy if available (token-specific or global)
             proxy_url = None
             if self.proxy_manager:
-                proxy_config = await self.proxy_manager.get_proxy_config()
-                if proxy_config.proxy_enabled and proxy_config.proxy_url:
-                    proxy_url = proxy_config.proxy_url
+                proxy_url = await self.proxy_manager.get_proxy_url(token_id)
 
             # Download with proxy support
             async with AsyncSession() as session:
-                proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-                response = await session.get(url, timeout=60, proxies=proxies)
+                kwargs = {"timeout": 60, "impersonate": "chrome"}
+                if proxy_url:
+                    kwargs["proxy"] = proxy_url
+                response = await session.get(url, **kwargs)
 
                 if response.status_code != 200:
                     raise Exception(f"Download failed: HTTP {response.status_code}")

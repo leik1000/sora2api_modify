@@ -63,6 +63,7 @@ class AddTokenRequest(BaseModel):
     st: Optional[str] = None  # Session Token (optional, for storage)
     rt: Optional[str] = None  # Refresh Token (optional, for storage)
     client_id: Optional[str] = None  # Client ID (optional)
+    proxy_url: Optional[str] = None  # Proxy URL (optional)
     remark: Optional[str] = None
     image_enabled: bool = True  # Enable image generation
     video_enabled: bool = True  # Enable video generation
@@ -83,6 +84,7 @@ class UpdateTokenRequest(BaseModel):
     st: Optional[str] = None
     rt: Optional[str] = None
     client_id: Optional[str] = None  # Client ID
+    proxy_url: Optional[str] = None  # Proxy URL
     remark: Optional[str] = None
     image_enabled: Optional[bool] = None  # Enable image generation
     video_enabled: Optional[bool] = None  # Enable video generation
@@ -172,6 +174,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)) -> List[dict]:
             "st": token.st,  # 完整的Session Token
             "rt": token.rt,  # 完整的Refresh Token
             "client_id": token.client_id,  # Client ID
+            "proxy_url": token.proxy_url,  # Proxy URL
             "email": token.email,
             "name": token.name,
             "remark": token.remark,
@@ -214,6 +217,7 @@ async def add_token(request: AddTokenRequest, token: str = Depends(verify_admin_
             st=request.st,
             rt=request.rt,
             client_id=request.client_id,
+            proxy_url=request.proxy_url,
             remark=request.remark,
             update_if_exists=False,
             image_enabled=request.image_enabled,
@@ -409,7 +413,7 @@ async def update_token(
     request: UpdateTokenRequest,
     token: str = Depends(verify_admin_token)
 ):
-    """Update token (AT, ST, RT, remark, image_enabled, video_enabled, concurrency limits)"""
+    """Update token (AT, ST, RT, proxy_url, remark, image_enabled, video_enabled, concurrency limits)"""
     try:
         await token_manager.update_token(
             token_id=token_id,
@@ -417,6 +421,7 @@ async def update_token(
             st=request.st,
             rt=request.rt,
             client_id=request.client_id,
+            proxy_url=request.proxy_url,
             remark=request.remark,
             image_enabled=request.image_enabled,
             video_enabled=request.video_enabled,

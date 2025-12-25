@@ -96,7 +96,8 @@ class SoraClient:
     async def _make_request(self, method: str, endpoint: str, token: str,
                            json_data: Optional[Dict] = None,
                            multipart: Optional[Dict] = None,
-                           add_sentinel_token: bool = False) -> Dict[str, Any]:
+                           add_sentinel_token: bool = False,
+                           token_id: Optional[int] = None) -> Dict[str, Any]:
         """Make HTTP request with proxy support
 
         Args:
@@ -106,8 +107,9 @@ class SoraClient:
             json_data: JSON request body
             multipart: Multipart form data (for file uploads)
             add_sentinel_token: Whether to add openai-sentinel-token header (only for generation requests)
+            token_id: Token ID for getting token-specific proxy (optional)
         """
-        proxy_url = await self.proxy_manager.get_proxy_url()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id)
 
         headers = {
             "Authorization": f"Bearer {token}"
@@ -226,7 +228,7 @@ class SoraClient:
         return result["id"]
     
     async def generate_image(self, prompt: str, token: str, width: int = 360,
-                            height: int = 360, media_id: Optional[str] = None) -> str:
+                            height: int = 360, media_id: Optional[str] = None, token_id: Optional[int] = None) -> str:
         """Generate image (text-to-image or image-to-image)"""
         operation = "remix" if media_id else "simple_compose"
 
@@ -250,12 +252,12 @@ class SoraClient:
         }
 
         # 生成请求需要添加 sentinel token
-        result = await self._make_request("POST", "/video_gen", token, json_data=json_data, add_sentinel_token=True)
+        result = await self._make_request("POST", "/video_gen", token, json_data=json_data, add_sentinel_token=True, token_id=token_id)
         return result["id"]
     
     async def generate_video(self, prompt: str, token: str, orientation: str = "landscape",
                             media_id: Optional[str] = None, n_frames: int = 450, style_id: Optional[str] = None,
-                            model: str = "sy_8", size: str = "small") -> str:
+                            model: str = "sy_8", size: str = "small", token_id: Optional[int] = None) -> str:
         """Generate video (text-to-video or image-to-video)
 
         Args:
@@ -267,6 +269,7 @@ class SoraClient:
             style_id: Optional style ID
             model: Model to use (sy_8 for standard, sy_ore for pro)
             size: Video size (small for standard, large for HD)
+            token_id: Token ID for getting token-specific proxy (optional)
         """
         inpaint_items = []
         if media_id:
@@ -287,24 +290,24 @@ class SoraClient:
         }
 
         # 生成请求需要添加 sentinel token
-        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True)
+        result = await self._make_request("POST", "/nf/create", token, json_data=json_data, add_sentinel_token=True, token_id=token_id)
         return result["id"]
     
-    async def get_image_tasks(self, token: str, limit: int = 20) -> Dict[str, Any]:
+    async def get_image_tasks(self, token: str, limit: int = 20, token_id: Optional[int] = None) -> Dict[str, Any]:
         """Get recent image generation tasks"""
-        return await self._make_request("GET", f"/v2/recent_tasks?limit={limit}", token)
-    
-    async def get_video_drafts(self, token: str, limit: int = 15) -> Dict[str, Any]:
-        """Get recent video drafts"""
-        return await self._make_request("GET", f"/project_y/profile/drafts?limit={limit}", token)
+        return await self._make_request("GET", f"/v2/recent_tasks?limit={limit}", token, token_id=token_id)
 
-    async def get_pending_tasks(self, token: str) -> list:
+    async def get_video_drafts(self, token: str, limit: int = 15, token_id: Optional[int] = None) -> Dict[str, Any]:
+        """Get recent video drafts"""
+        return await self._make_request("GET", f"/project_y/profile/drafts?limit={limit}", token, token_id=token_id)
+
+    async def get_pending_tasks(self, token: str, token_id: Optional[int] = None) -> list:
         """Get pending video generation tasks
 
         Returns:
             List of pending tasks with progress information
         """
-        result = await self._make_request("GET", "/nf/pending/v2", token)
+        result = await self._make_request("GET", "/nf/pending/v2", token, token_id=token_id)
         # The API returns a list directly
         return result if isinstance(result, list) else []
 

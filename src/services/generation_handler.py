@@ -56,20 +56,22 @@ MODEL_CONFIG = {
         "orientation": "portrait",
         "n_frames": 450
     },
-    # Video models with 25s duration (750 frames)
+    # Video models with 25s duration (750 frames) - require Pro subscription
     "sora2-landscape-25s": {
         "type": "video",
         "orientation": "landscape",
         "n_frames": 750,
         "model": "sy_8",
-        "size": "small"
+        "size": "small",
+        "require_pro": True
     },
     "sora2-portrait-25s": {
         "type": "video",
         "orientation": "portrait",
         "n_frames": 750,
         "model": "sy_8",
-        "size": "small"
+        "size": "small",
+        "require_pro": True
     },
     # Pro video models (require Pro subscription)
     "sora2pro-landscape-10s": {
@@ -491,14 +493,16 @@ class GenerationHandler:
                         n_frames=n_frames,
                         style_id=style_id,
                         model=sora_model,
-                        size=video_size
+                        size=video_size,
+                        token_id=token_obj.id
                     )
             else:
                 task_id = await self.sora_client.generate_image(
                     prompt, token_obj.token,
                     width=model_config["width"],
                     height=model_config["height"],
-                    media_id=media_id
+                    media_id=media_id,
+                    token_id=token_obj.id
                 )
             
             # Save task to database
@@ -645,7 +649,7 @@ class GenerationHandler:
             try:
                 if is_video:
                     # Get pending tasks to check progress
-                    pending_tasks = await self.sora_client.get_pending_tasks(token)
+                    pending_tasks = await self.sora_client.get_pending_tasks(token, token_id=token_id)
 
                     # Find matching task in pending tasks
                     task_found = False
@@ -677,7 +681,7 @@ class GenerationHandler:
                     # If task not found in pending tasks, it's completed - fetch from drafts
                     if not task_found:
                         debug_logger.log_info(f"Task {task_id} not found in pending tasks, fetching from drafts...")
-                        result = await self.sora_client.get_video_drafts(token)
+                        result = await self.sora_client.get_video_drafts(token, token_id=token_id)
                         items = result.get("items", [])
 
                         # Find matching task in drafts
@@ -794,7 +798,7 @@ class GenerationHandler:
                                         # Cache watermark-free video (if cache enabled)
                                         if config.cache_enabled:
                                             try:
-                                                cached_filename = await self.file_cache.download_and_cache(watermark_free_url, "video")
+                                                cached_filename = await self.file_cache.download_and_cache(watermark_free_url, "video", token_id=token_id)
                                                 local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
                                                 if stream:
                                                     yield self._format_stream_chunk(
@@ -852,7 +856,7 @@ class GenerationHandler:
                                             raise Exception("Video URL not found")
                                         if config.cache_enabled:
                                             try:
-                                                cached_filename = await self.file_cache.download_and_cache(url, "video")
+                                                cached_filename = await self.file_cache.download_and_cache(url, "video", token_id=token_id)
                                                 local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
                                             except Exception as cache_error:
                                                 local_url = url
@@ -870,7 +874,7 @@ class GenerationHandler:
                                                 )
 
                                             try:
-                                                cached_filename = await self.file_cache.download_and_cache(url, "video")
+                                                cached_filename = await self.file_cache.download_and_cache(url, "video", token_id=token_id)
                                                 local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
                                                 if stream:
                                                     yield self._format_stream_chunk(
@@ -906,7 +910,7 @@ class GenerationHandler:
                                     yield "data: [DONE]\n\n"
                                 return
                 else:
-                    result = await self.sora_client.get_image_tasks(token)
+                    result = await self.sora_client.get_image_tasks(token, token_id=token_id)
                     task_responses = result.get("task_responses", [])
 
                     # Find matching task
@@ -936,7 +940,7 @@ class GenerationHandler:
                                     if config.cache_enabled:
                                         for idx, url in enumerate(urls):
                                             try:
-                                                cached_filename = await self.file_cache.download_and_cache(url, "image")
+                                                cached_filename = await self.file_cache.download_and_cache(url, "image", token_id=token_id)
                                                 local_url = f"{base_url}/tmp/{cached_filename}"
                                                 local_urls.append(local_url)
                                                 if stream and len(urls) > 1:
@@ -1383,7 +1387,8 @@ class GenerationHandler:
                 orientation=model_config["orientation"],
                 n_frames=n_frames,
                 model=sora_model,
-                size=video_size
+                size=video_size,
+                token_id=token_obj.id
             )
             debug_logger.log_info(f"Video generation started, task_id: {task_id}")
 
