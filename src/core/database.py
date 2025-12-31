@@ -254,6 +254,21 @@ class Database:
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
+            # Check and add missing columns to request_logs table
+            if await self._table_exists(db, "request_logs"):
+                columns_to_add = [
+                    ("task_id", "TEXT"),
+                    ("updated_at", "TIMESTAMP"),
+                ]
+
+                for col_name, col_type in columns_to_add:
+                    if not await self._column_exists(db, "request_logs", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_type}")
+                            print(f"  ✓ Added column '{col_name}' to request_logs table")
+                        except Exception as e:
+                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+
             # Ensure all config tables have their default rows
             # Pass config_dict if available to initialize from setting.toml
             await self._ensure_config_rows(db, config_dict)
@@ -340,12 +355,14 @@ class Database:
                 CREATE TABLE IF NOT EXISTS request_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     token_id INTEGER,
+                    task_id TEXT,
                     operation TEXT NOT NULL,
                     request_body TEXT,
                     response_body TEXT,
                     status_code INTEGER NOT NULL,
                     duration FLOAT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
                 )
             """)
@@ -848,15 +865,40 @@ class Database:
             return None
     
     # Request log operations
-    async def log_request(self, log: RequestLog):
-        """Log a request"""
+    async def log_request(self, log: RequestLog) -> int:
+        """Log a request and return log ID"""
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO request_logs (token_id, operation, request_body, response_body, status_code, duration)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (log.token_id, log.operation, log.request_body, log.response_body, 
+            cursor = await db.execute("""
+                INSERT INTO request_logs (token_id, task_id, operation, request_body, response_body, status_code, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (log.token_id, log.task_id, log.operation, log.request_body, log.response_body,
                   log.status_code, log.duration))
             await db.commit()
+            return cursor.lastrowid
+
+    async def update_request_log(self, log_id: int, response_body: Optional[str] = None,
+                                 status_code: Optional[int] = None, duration: Optional[float] = None):
+        """Update request log with completion data"""
+        async with aiosqlite.connect(self.db_path) as db:
+            updates = []
+            params = []
+
+            if response_body is not None:
+                updates.append("response_body = ?")
+                params.append(response_body)
+            if status_code is not None:
+                updates.append("status_code = ?")
+                params.append(status_code)
+            if duration is not None:
+                updates.append("duration = ?")
+                params.append(duration)
+
+            if updates:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                params.append(log_id)
+                query = f"UPDATE request_logs SET {', '.join(updates)} WHERE id = ?"
+                await db.execute(query, params)
+                await db.commit()
     
     async def get_recent_logs(self, limit: int = 100) -> List[dict]:
         """Get recent logs with token email"""
@@ -866,13 +908,15 @@ class Database:
                 SELECT
                     rl.id,
                     rl.token_id,
+                    rl.task_id,
                     rl.operation,
                     rl.request_body,
                     rl.response_body,
                     rl.status_code,
                     rl.duration,
                     rl.created_at,
-                    t.email as token_email
+                    t.email as token_email,
+                    t.username as token_username
                 FROM request_logs rl
                 LEFT JOIN tokens t ON rl.token_id = t.id
                 ORDER BY rl.created_at DESC

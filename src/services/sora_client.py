@@ -180,6 +180,29 @@ class SoraClient:
 
             # Check status
             if response.status_code not in [200, 201]:
+                # Parse error response
+                error_data = None
+                try:
+                    error_data = response.json()
+                except:
+                    pass
+
+                # Check for unsupported_country_code error
+                if error_data and isinstance(error_data, dict):
+                    error_info = error_data.get("error", {})
+                    if error_info.get("code") == "unsupported_country_code":
+                        # Create structured error with full error data
+                        import json
+                        error_msg = json.dumps(error_data)
+                        debug_logger.log_error(
+                            error_message=f"Unsupported country: {error_msg}",
+                            status_code=response.status_code,
+                            response_text=error_msg
+                        )
+                        # Raise exception with structured error data
+                        raise Exception(error_msg)
+
+                # Generic error handling
                 error_msg = f"API request failed: {response.status_code} - {response.text}"
                 debug_logger.log_error(
                     error_message=error_msg,

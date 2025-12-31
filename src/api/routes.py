@@ -181,15 +181,27 @@ async def create_chat_completion(
                     ):
                         yield chunk
                 except Exception as e:
+                    # Try to parse structured error (JSON format)
+                    error_data = None
+                    try:
+                        error_data = json_module.loads(str(e))
+                    except:
+                        pass
+
                     # Return OpenAI-compatible error format
-                    error_response = {
-                        "error": {
-                            "message": str(e),
-                            "type": "server_error",
-                            "param": None,
-                            "code": None
+                    if error_data and isinstance(error_data, dict) and "error" in error_data:
+                        # Structured error (e.g., unsupported_country_code)
+                        error_response = error_data
+                    else:
+                        # Generic error
+                        error_response = {
+                            "error": {
+                                "message": str(e),
+                                "type": "server_error",
+                                "param": None,
+                                "code": None
+                            }
                         }
-                    }
                     error_chunk = f'data: {json_module.dumps(error_response)}\n\n'
                     yield error_chunk
                     yield 'data: [DONE]\n\n'

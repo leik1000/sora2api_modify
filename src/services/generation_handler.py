@@ -332,6 +332,8 @@ class GenerationHandler:
             stream: Whether to stream response
         """
         start_time = time.time()
+        log_id = None  # Initialize log_id to avoid reference before assignment
+        token_obj = None  # Initialize token_obj to avoid reference before assignment
 
         # Validate model
         if model not in MODEL_CONFIG:
@@ -515,7 +517,18 @@ class GenerationHandler:
                 progress=0.0
             )
             await self.db.create_task(task)
-            
+
+            # Create initial log entry (status_code=-1, duration=-1.0 means in-progress)
+            log_id = await self._log_request(
+                token_obj.id,
+                f"generate_{model_config['type']}",
+                {"model": model, "prompt": prompt, "has_image": image is not None},
+                {},  # Empty response initially
+                -1,  # -1 means in-progress
+                -1.0,  # -1.0 means in-progress
+                task_id=task_id
+            )
+
             # Record usage
             await self.token_manager.record_usage(token_obj.id, is_video=is_video)
             
@@ -557,14 +570,14 @@ class GenerationHandler:
                 except:
                     response_data["result_urls"] = task_info.result_urls
 
-            await self._log_request(
-                token_obj.id,
-                f"generate_{model_config['type']}",
-                {"model": model, "prompt": prompt, "has_image": image is not None},
-                response_data,
-                200,
-                duration
-            )
+            # Update log entry with completion data
+            if log_id:
+                await self.db.update_request_log(
+                    log_id,
+                    response_body=json.dumps(response_data),
+                    status_code=200,
+                    duration=duration
+                )
 
         except Exception as e:
             # Release lock for image generation on error
@@ -584,16 +597,33 @@ class GenerationHandler:
                 is_overload = "heavy_load" in error_str or "under heavy load" in error_str
                 await self.token_manager.record_error(token_obj.id, is_overload=is_overload)
 
-            # Log failed request
+            # Parse error message to check if it's a structured error (JSON)
+            error_response = None
+            try:
+                import json
+                error_response = json.loads(str(e))
+            except:
+                pass
+
+            # Update log entry with error data
             duration = time.time() - start_time
-            await self._log_request(
-                token_obj.id if token_obj else None,
-                f"generate_{model_config['type'] if model_config else 'unknown'}",
-                {"model": model, "prompt": prompt, "has_image": image is not None},
-                {"error": str(e)},
-                500,
-                duration
-            )
+            if log_id:
+                if error_response:
+                    # Structured error (e.g., unsupported_country_code)
+                    await self.db.update_request_log(
+                        log_id,
+                        response_body=json.dumps(error_response),
+                        status_code=400,
+                        duration=duration
+                    )
+                else:
+                    # Generic error
+                    await self.db.update_request_log(
+                        log_id,
+                        response_body=json.dumps({"error": str(e)}),
+                        status_code=500,
+                        duration=duration
+                    )
             raise e
     
     async def _poll_task_result(self, task_id: str, token: str, is_video: bool,
@@ -1136,21 +1166,23 @@ class GenerationHandler:
 
     async def _log_request(self, token_id: Optional[int], operation: str,
                           request_data: Dict[str, Any], response_data: Dict[str, Any],
-                          status_code: int, duration: float):
-        """Log request to database"""
+                          status_code: int, duration: float, task_id: Optional[str] = None) -> Optional[int]:
+        """Log request to database and return log ID"""
         try:
             log = RequestLog(
                 token_id=token_id,
+                task_id=task_id,
                 operation=operation,
                 request_body=json.dumps(request_data),
                 response_body=json.dumps(response_data),
                 status_code=status_code,
                 duration=duration
             )
-            await self.db.log_request(log)
+            return await self.db.log_request(log)
         except Exception as e:
             # Don't fail the request if logging fails
             print(f"Failed to log request: {e}")
+            return None
 
     # ==================== Character Creation and Remix Handlers ====================
 
@@ -1171,6 +1203,7 @@ class GenerationHandler:
         if not token_obj:
             raise Exception("No available tokens for character creation")
 
+        start_time = time.time()
         try:
             yield self._format_stream_chunk(
                 reasoning_content="**Character Creation Begins**\n\nInitializing character creation...\n",
@@ -1255,6 +1288,26 @@ class GenerationHandler:
             await self.sora_client.set_character_public(cameo_id, token_obj.token)
             debug_logger.log_info(f"Character set as public")
 
+            # Log successful character creation
+            duration = time.time() - start_time
+            await self._log_request(
+                token_id=token_obj.id,
+                operation="character_only",
+                request_data={
+                    "type": "character_creation",
+                    "has_video": True
+                },
+                response_data={
+                    "success": True,
+                    "username": username,
+                    "display_name": display_name,
+                    "character_id": character_id,
+                    "cameo_id": cameo_id
+                },
+                status_code=200,
+                duration=duration
+            )
+
             # Step 7: Return success message
             yield self._format_stream_chunk(
                 content=f"角色创建成功，角色名@{username}",
@@ -1263,6 +1316,23 @@ class GenerationHandler:
             yield "data: [DONE]\n\n"
 
         except Exception as e:
+            # Log failed character creation
+            duration = time.time() - start_time
+            await self._log_request(
+                token_id=token_obj.id if token_obj else None,
+                operation="character_only",
+                request_data={
+                    "type": "character_creation",
+                    "has_video": True
+                },
+                response_data={
+                    "success": False,
+                    "error": str(e)
+                },
+                status_code=500,
+                duration=duration
+            )
+
             debug_logger.log_error(
                 error_message=f"Character creation failed: {str(e)}",
                 status_code=500,
@@ -1289,6 +1359,10 @@ class GenerationHandler:
             raise Exception("No available tokens for video generation")
 
         character_id = None
+        start_time = time.time()
+        username = None
+        display_name = None
+        cameo_id = None
         try:
             yield self._format_stream_chunk(
                 reasoning_content="**Character Creation and Video Generation Begins**\n\nInitializing...\n",
@@ -1366,6 +1440,28 @@ class GenerationHandler:
             )
             debug_logger.log_info(f"Character finalized, character_id: {character_id}")
 
+            # Log successful character creation (before video generation)
+            character_creation_duration = time.time() - start_time
+            await self._log_request(
+                token_id=token_obj.id,
+                operation="character_with_video",
+                request_data={
+                    "type": "character_creation_with_video",
+                    "has_video": True,
+                    "prompt": prompt
+                },
+                response_data={
+                    "success": True,
+                    "username": username,
+                    "display_name": display_name,
+                    "character_id": character_id,
+                    "cameo_id": cameo_id,
+                    "stage": "character_created"
+                },
+                status_code=200,
+                duration=character_creation_duration
+            )
+
             # Step 6: Generate video with character
             yield self._format_stream_chunk(
                 reasoning_content="**Video Generation Process Begins**\n\nGenerating video with character...\n"
@@ -1414,6 +1510,28 @@ class GenerationHandler:
             await self.token_manager.record_success(token_obj.id, is_video=True)
 
         except Exception as e:
+            # Log failed character creation
+            duration = time.time() - start_time
+            await self._log_request(
+                token_id=token_obj.id if token_obj else None,
+                operation="character_with_video",
+                request_data={
+                    "type": "character_creation_with_video",
+                    "has_video": True,
+                    "prompt": prompt
+                },
+                response_data={
+                    "success": False,
+                    "username": username,
+                    "display_name": display_name,
+                    "character_id": character_id,
+                    "cameo_id": cameo_id,
+                    "error": str(e)
+                },
+                status_code=500,
+                duration=duration
+            )
+
             # Record error (check if it's an overload error)
             if token_obj:
                 error_str = str(e).lower()
@@ -1553,6 +1671,16 @@ class GenerationHandler:
 
                 debug_logger.log_info(f"Cameo status: {current_status} (message: {status_message}) (attempt {attempt + 1}/{max_attempts})")
 
+                # Check if processing failed
+                if current_status == "failed":
+                    error_message = status_message or "Character creation failed"
+                    debug_logger.log_error(
+                        error_message=f"Cameo processing failed: {error_message}",
+                        status_code=500,
+                        response_text=error_message
+                    )
+                    raise Exception(f"角色创建失败: {error_message}")
+
                 # Check if processing is complete
                 # Primary condition: status_message == "Completed" means processing is done
                 if status_message == "Completed":
@@ -1567,6 +1695,11 @@ class GenerationHandler:
             except Exception as e:
                 consecutive_errors += 1
                 error_msg = str(e)
+
+                # Check if it's a character creation failure (not a network error)
+                # These should be raised immediately, not retried
+                if "角色创建失败" in error_msg:
+                    raise
 
                 # Log error with context
                 debug_logger.log_error(

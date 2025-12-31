@@ -59,9 +59,9 @@ class TokenManager:
         # 转换为小写
         return format_choice.lower()
 
-    async def get_user_info(self, access_token: str) -> dict:
+    async def get_user_info(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get user info from Sora API"""
-        proxy_url = await self.proxy_manager.get_proxy_url()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
         async with AsyncSession() as session:
             headers = {
@@ -90,7 +90,7 @@ class TokenManager:
 
             return response.json()
 
-    async def get_subscription_info(self, token: str) -> Dict[str, Any]:
+    async def get_subscription_info(self, token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> Dict[str, Any]:
         """Get subscription information from Sora API
 
         Returns:
@@ -101,7 +101,7 @@ class TokenManager:
             }
         """
         print(f"🔍 开始获取订阅信息...")
-        proxy_url = await self.proxy_manager.get_proxy_url()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
         headers = {
             "Authorization": f"Bearer {token}"
@@ -163,9 +163,9 @@ class TokenManager:
 
                 raise Exception(f"Failed to get subscription info: {response.status_code}")
 
-    async def get_sora2_invite_code(self, access_token: str) -> dict:
+    async def get_sora2_invite_code(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get Sora2 invite code"""
-        proxy_url = await self.proxy_manager.get_proxy_url()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
         print(f"🔍 开始获取Sora2邀请码...")
 
@@ -263,7 +263,7 @@ class TokenManager:
                     "invite_code": None
                 }
 
-    async def get_sora2_remaining_count(self, access_token: str) -> dict:
+    async def get_sora2_remaining_count(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get Sora2 remaining video count
 
         Returns:
@@ -273,7 +273,7 @@ class TokenManager:
                 "access_resets_in_seconds": 46833
             }
         """
-        proxy_url = await self.proxy_manager.get_proxy_url()
+        proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
         print(f"🔍 开始获取Sora2剩余次数...")
 
@@ -692,7 +692,7 @@ class TokenManager:
 
         # Get user info from Sora API
         try:
-            user_info = await self.get_user_info(token_value)
+            user_info = await self.get_user_info(token_value, proxy_url=proxy_url)
             email = user_info.get("email", jwt_email or "")
             name = user_info.get("name") or ""
         except Exception as e:
@@ -705,7 +705,7 @@ class TokenManager:
         plan_title = None
         subscription_end = None
         try:
-            sub_info = await self.get_subscription_info(token_value)
+            sub_info = await self.get_subscription_info(token_value, proxy_url=proxy_url)
             plan_type = sub_info.get("plan_type")
             plan_title = sub_info.get("plan_title")
             # Parse subscription end time
@@ -727,7 +727,7 @@ class TokenManager:
         sora2_total_count = 0
         sora2_remaining_count = 0
         try:
-            sora2_info = await self.get_sora2_invite_code(token_value)
+            sora2_info = await self.get_sora2_invite_code(token_value, proxy_url=proxy_url)
             sora2_supported = sora2_info.get("supported", False)
             sora2_invite_code = sora2_info.get("invite_code")
             sora2_redeemed_count = sora2_info.get("redeemed_count", 0)
@@ -736,7 +736,7 @@ class TokenManager:
             # If Sora2 is supported, get remaining count
             if sora2_supported:
                 try:
-                    remaining_info = await self.get_sora2_remaining_count(token_value)
+                    remaining_info = await self.get_sora2_remaining_count(token_value, proxy_url=proxy_url)
                     if remaining_info.get("success"):
                         sora2_remaining_count = remaining_info.get("remaining_count", 0)
                         print(f"✅ Sora2剩余次数: {sora2_remaining_count}")
@@ -753,7 +753,7 @@ class TokenManager:
         # Check and set username if needed
         try:
             # Get fresh user info to check username
-            user_info = await self.get_user_info(token_value)
+            user_info = await self.get_user_info(token_value, proxy_url=proxy_url)
             username = user_info.get("username")
 
             # If username is null, need to set one
@@ -931,10 +931,10 @@ class TokenManager:
 
         try:
             # Try to get user info from Sora API
-            user_info = await self.get_user_info(token_data.token)
+            user_info = await self.get_user_info(token_data.token, token_id)
 
             # Refresh Sora2 invite code and counts
-            sora2_info = await self.get_sora2_invite_code(token_data.token)
+            sora2_info = await self.get_sora2_invite_code(token_data.token, token_id)
             sora2_supported = sora2_info.get("supported", False)
             sora2_invite_code = sora2_info.get("invite_code")
             sora2_redeemed_count = sora2_info.get("redeemed_count", 0)
@@ -944,7 +944,7 @@ class TokenManager:
             # If Sora2 is supported, get remaining count
             if sora2_supported:
                 try:
-                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token, token_id)
                     if remaining_info.get("success"):
                         sora2_remaining_count = remaining_info.get("remaining_count", 0)
                 except Exception as e:
@@ -1012,19 +1012,22 @@ class TokenManager:
             try:
                 token_data = await self.db.get_token(token_id)
                 if token_data and token_data.sora2_supported:
-                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token, token_id)
                     if remaining_info.get("success"):
                         remaining_count = remaining_info.get("remaining_count", 0)
                         await self.db.update_token_sora2_remaining(token_id, remaining_count)
                         print(f"✅ 更新Token {token_id} 的Sora2剩余次数: {remaining_count}")
 
-                        # If remaining count is 0, set cooldown
-                        if remaining_count == 0:
+                        # If remaining count is 1 or less, disable token and set cooldown
+                        if remaining_count <= 1:
                             reset_seconds = remaining_info.get("access_resets_in_seconds", 0)
                             if reset_seconds > 0:
                                 cooldown_until = datetime.now() + timedelta(seconds=reset_seconds)
                                 await self.db.update_token_sora2_cooldown(token_id, cooldown_until)
-                                print(f"⏱️ Token {token_id} 剩余次数为0，设置冷却时间至: {cooldown_until}")
+                                print(f"⏱️ Token {token_id} 剩余次数为{remaining_count}，设置冷却时间至: {cooldown_until}")
+                            # Disable token
+                            await self.disable_token(token_id)
+                            print(f"🚫 Token {token_id} 剩余次数为{remaining_count}，已自动禁用")
             except Exception as e:
                 print(f"Failed to update Sora2 remaining count: {e}")
     
@@ -1040,7 +1043,7 @@ class TokenManager:
                 print(f"🔄 Token {token_id} Sora2冷却已过期，正在刷新剩余次数...")
 
                 try:
-                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token, token_id)
                     if remaining_info.get("success"):
                         remaining_count = remaining_info.get("remaining_count", 0)
                         await self.db.update_token_sora2_remaining(token_id, remaining_count)

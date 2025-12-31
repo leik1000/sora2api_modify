@@ -71,12 +71,14 @@ class RequestLog(BaseModel):
     """Request log model"""
     id: Optional[int] = None
     token_id: Optional[int] = None
+    task_id: Optional[str] = None  # Link to task for progress tracking
     operation: str
     request_body: Optional[str] = None
     response_body: Optional[str] = None
-    status_code: int
-    duration: float
+    status_code: int  # -1 for in-progress
+    duration: float  # -1.0 for in-progress
     created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 class AdminConfig(BaseModel):
     """Admin configuration"""

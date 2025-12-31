@@ -97,6 +97,8 @@ class ImportTokenItem(BaseModel):
     access_token: str  # Access Token (AT)
     session_token: Optional[str] = None  # Session Token (ST)
     refresh_token: Optional[str] = None  # Refresh Token (RT)
+    proxy_url: Optional[str] = None  # Proxy URL (optional, for compatibility)
+    remark: Optional[str] = None  # Remark (optional, for compatibility)
     is_active: bool = True  # Active status
     image_enabled: bool = True  # Enable image generation
     video_enabled: bool = True  # Enable video generation
@@ -345,11 +347,13 @@ async def delete_token(token_id: int, token: str = Depends(verify_admin_token)):
 @router.post("/api/tokens/import")
 async def import_tokens(request: ImportTokensRequest, token: str = Depends(verify_admin_token)):
     """Import tokens in append mode (update if exists, add if not)"""
-    try:
-        added_count = 0
-        updated_count = 0
+    added_count = 0
+    updated_count = 0
+    failed_count = 0
+    results = []
 
-        for import_item in request.tokens:
+    for import_item in request.tokens:
+        try:
             # Check if token with this email already exists
             existing_token = await db.get_token_by_email(import_item.email)
 
@@ -360,6 +364,8 @@ async def import_tokens(request: ImportTokensRequest, token: str = Depends(verif
                     token=import_item.access_token,
                     st=import_item.session_token,
                     rt=import_item.refresh_token,
+                    proxy_url=import_item.proxy_url,
+                    remark=import_item.remark,
                     image_enabled=import_item.image_enabled,
                     video_enabled=import_item.video_enabled,
                     image_concurrency=import_item.image_concurrency,
@@ -375,12 +381,19 @@ async def import_tokens(request: ImportTokensRequest, token: str = Depends(verif
                         video_concurrency=import_item.video_concurrency
                     )
                 updated_count += 1
+                results.append({
+                    "email": import_item.email,
+                    "status": "updated",
+                    "success": True
+                })
             else:
                 # Add new token
                 new_token = await token_manager.add_token(
                     token_value=import_item.access_token,
                     st=import_item.session_token,
                     rt=import_item.refresh_token,
+                    proxy_url=import_item.proxy_url,
+                    remark=import_item.remark,
                     update_if_exists=False,
                     image_enabled=import_item.image_enabled,
                     video_enabled=import_item.video_enabled,
@@ -398,15 +411,28 @@ async def import_tokens(request: ImportTokensRequest, token: str = Depends(verif
                         video_concurrency=import_item.video_concurrency
                     )
                 added_count += 1
+                results.append({
+                    "email": import_item.email,
+                    "status": "added",
+                    "success": True
+                })
+        except Exception as e:
+            failed_count += 1
+            results.append({
+                "email": import_item.email,
+                "status": "failed",
+                "success": False,
+                "error": str(e)
+            })
 
-        return {
-            "success": True,
-            "message": f"Import completed: {added_count} added, {updated_count} updated",
-            "added": added_count,
-            "updated": updated_count
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
+    return {
+        "success": True,
+        "message": f"Import completed: {added_count} added, {updated_count} updated, {failed_count} failed",
+        "added": added_count,
+        "updated": updated_count,
+        "failed": failed_count,
+        "results": results
+    }
 
 @router.put("/api/tokens/{token_id}")
 async def update_token(
@@ -654,12 +680,12 @@ async def activate_sora2(
 
         if result.get("success"):
             # Get new invite code after activation
-            sora2_info = await token_manager.get_sora2_invite_code(token_obj.token)
+            sora2_info = await token_manager.get_sora2_invite_code(token_obj.token, token_id)
 
             # Get remaining count
             sora2_remaining_count = 0
             try:
-                remaining_info = await token_manager.get_sora2_remaining_count(token_obj.token)
+                remaining_info = await token_manager.get_sora2_remaining_count(token_obj.token, token_id)
                 if remaining_info.get("success"):
                     sora2_remaining_count = remaining_info.get("remaining_count", 0)
             except Exception as e:
@@ -697,20 +723,34 @@ async def activate_sora2(
 # Logs endpoints
 @router.get("/api/logs")
 async def get_logs(limit: int = 100, token: str = Depends(verify_admin_token)):
-    """Get recent logs with token email"""
+    """Get recent logs with token email and task progress"""
     logs = await db.get_recent_logs(limit)
-    return [{
-        "id": log.get("id"),
-        "token_id": log.get("token_id"),
-        "token_email": log.get("token_email"),
-        "token_username": log.get("token_username"),
-        "operation": log.get("operation"),
-        "status_code": log.get("status_code"),
-        "duration": log.get("duration"),
-        "created_at": log.get("created_at"),
-        "request_body": log.get("request_body"),
-        "response_body": log.get("response_body")
-    } for log in logs]
+    result = []
+    for log in logs:
+        log_data = {
+            "id": log.get("id"),
+            "token_id": log.get("token_id"),
+            "token_email": log.get("token_email"),
+            "token_username": log.get("token_username"),
+            "operation": log.get("operation"),
+            "status_code": log.get("status_code"),
+            "duration": log.get("duration"),
+            "created_at": log.get("created_at"),
+            "request_body": log.get("request_body"),
+            "response_body": log.get("response_body"),
+            "task_id": log.get("task_id")
+        }
+
+        # If task_id exists and status is in-progress, get task progress
+        if log.get("task_id") and log.get("status_code") == -1:
+            task = await db.get_task(log.get("task_id"))
+            if task:
+                log_data["progress"] = task.progress
+                log_data["task_status"] = task.status
+
+        result.append(log_data)
+
+    return result
 
 @router.delete("/api/logs")
 async def clear_logs(token: str = Depends(verify_admin_token)):
