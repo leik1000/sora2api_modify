@@ -40,6 +40,8 @@ class Token(BaseModel):
     video_concurrency: int = -1  # 视频并发数限制，-1表示不限制
     # 过期标记
     is_expired: bool = False  # Token是否已过期（401 token_invalidated）
+    # 禁用原因: manual=手动禁用, error_limit=错误次数超限, token_invalid=Token失效, expired=过期失效
+    disabled_reason: Optional[str] = None
 
 class TokenStats(BaseModel):
     """Token statistics"""

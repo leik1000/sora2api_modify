@@ -393,7 +393,8 @@ class Database:
                     video_enabled BOOLEAN DEFAULT 1,
                     image_concurrency INTEGER DEFAULT -1,
                     video_concurrency INTEGER DEFAULT -1,
-                    is_expired BOOLEAN DEFAULT 0
+                    is_expired BOOLEAN DEFAULT 0,
+                    disabled_reason TEXT
                 )
             """)
 
@@ -586,6 +587,22 @@ class Database:
             if not await self._column_exists(db, "admin_config", "auto_disable_on_401"):
                 await db.execute("ALTER TABLE admin_config ADD COLUMN auto_disable_on_401 BOOLEAN DEFAULT 1")
 
+            # Migration: Add disabled_reason column to tokens table if it doesn't exist
+            if not await self._column_exists(db, "tokens", "disabled_reason"):
+                await db.execute("ALTER TABLE tokens ADD COLUMN disabled_reason TEXT")
+                # For existing disabled tokens without a reason, set to 'manual'
+                await db.execute("""
+                    UPDATE tokens
+                    SET disabled_reason = 'manual'
+                    WHERE is_active = 0 AND disabled_reason IS NULL
+                """)
+                # For existing expired tokens, set to 'expired'
+                await db.execute("""
+                    UPDATE tokens
+                    SET disabled_reason = 'expired'
+                    WHERE is_expired = 1 AND disabled_reason IS NULL
+                """)
+
             await db.commit()
 
     async def init_config_from_toml(self, config_dict: dict, is_first_startup: bool = True):
@@ -698,27 +715,35 @@ class Database:
             """, (token_id,))
             await db.commit()
     
-    async def update_token_status(self, token_id: int, is_active: bool):
-        """Update token status"""
+    async def update_token_status(self, token_id: int, is_active: bool, disabled_reason: Optional[str] = None):
+        """Update token status and disabled reason"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                UPDATE tokens SET is_active = ? WHERE id = ?
-            """, (is_active, token_id))
+                UPDATE tokens SET is_active = ?, disabled_reason = ? WHERE id = ?
+            """, (is_active, disabled_reason, token_id))
             await db.commit()
 
     async def mark_token_expired(self, token_id: int):
-        """Mark token as expired and disable it"""
+        """Mark token as expired and disable it with reason"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                UPDATE tokens SET is_expired = 1, is_active = 0 WHERE id = ?
-            """, (token_id,))
+                UPDATE tokens SET is_expired = 1, is_active = 0, disabled_reason = ? WHERE id = ?
+            """, ("expired", token_id))
+            await db.commit()
+
+    async def mark_token_invalid(self, token_id: int):
+        """Mark token as invalid (401 error) and disable it"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tokens SET is_expired = 1, is_active = 0, disabled_reason = ? WHERE id = ?
+            """, ("token_invalid", token_id))
             await db.commit()
 
     async def clear_token_expired(self, token_id: int):
-        """Clear token expired flag"""
+        """Clear token expired flag and disabled reason"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                UPDATE tokens SET is_expired = 0 WHERE id = ?
+                UPDATE tokens SET is_expired = 0, disabled_reason = NULL WHERE id = ?
             """, (token_id,))
             await db.commit()
 

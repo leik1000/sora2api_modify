@@ -946,19 +946,21 @@ class TokenManager:
     
     async def update_token_status(self, token_id: int, is_active: bool):
         """Update token active status"""
-        await self.db.update_token_status(token_id, is_active)
+        # When manually changing status, set appropriate disabled_reason
+        disabled_reason = None if is_active else "manual"
+        await self.db.update_token_status(token_id, is_active, disabled_reason)
 
     async def enable_token(self, token_id: int):
         """Enable a token and reset error count"""
-        await self.db.update_token_status(token_id, True)
+        await self.db.update_token_status(token_id, True, None)  # Clear disabled_reason
         # Reset error count when enabling (in token_stats table)
         await self.db.reset_error_count(token_id)
         # Clear expired flag when enabling
         await self.db.clear_token_expired(token_id)
 
     async def disable_token(self, token_id: int):
-        """Disable a token"""
-        await self.db.update_token_status(token_id, False)
+        """Disable a token (manual disable)"""
+        await self.db.update_token_status(token_id, False, "manual")
 
     async def test_token(self, token_id: int) -> dict:
         """Test if a token is valid by calling Sora API and refresh account info (subscription + Sora2)"""
@@ -1048,6 +1050,14 @@ class TokenManager:
                     "valid": False,
                     "message": "Token已过期（token_invalidated）"
                 }
+            # Check if error is "Failed to get user info:401"
+            if "Failed to get user info:401" in error_msg or "Failed to get user info: 401" in error_msg:
+                # Mark token as invalid and disable it
+                await self.db.mark_token_invalid(token_id)
+                return {
+                    "valid": False,
+                    "message": "Token无效: Token is invalid: Failed to get user info:401"
+                }
             return {
                 "valid": False,
                 "message": f"Token is invalid: {error_msg}"
@@ -1077,7 +1087,8 @@ class TokenManager:
             admin_config = await self.db.get_admin_config()
 
             if stats and stats.consecutive_error_count >= admin_config.error_ban_threshold:
-                await self.db.update_token_status(token_id, False)
+                # Disable token with error_limit reason
+                await self.db.update_token_status(token_id, False, "error_limit")
     
     async def record_success(self, token_id: int, is_video: bool = False):
         """Record successful request (reset error count)"""

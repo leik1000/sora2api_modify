@@ -249,7 +249,10 @@ async def get_tokens(token: str = Depends(verify_admin_token)) -> List[dict]:
             "video_enabled": token.video_enabled,
             # 并发限制
             "image_concurrency": token.image_concurrency,
-            "video_concurrency": token.video_concurrency
+            "video_concurrency": token.video_concurrency,
+            # 过期和禁用信息
+            "is_expired": token.is_expired,
+            "disabled_reason": token.disabled_reason
         })
 
     return result
