@@ -10,6 +10,7 @@ from ..core.database import Database
 from ..core.models import Token, TokenStats
 from ..core.config import config
 from .proxy_manager import ProxyManager
+from .cf_cookie_manager import cf_cookie_manager
 from ..core.logger import debug_logger
 
 class TokenManager:
@@ -59,45 +60,108 @@ class TokenManager:
         # 转换为小写
         return format_choice.lower()
 
+    async def _build_cf_headers(self, access_token: str, proxy_url: Optional[str] = None) -> dict:
+        """Build headers with CF clearance cookies if available.
+
+        Fetches CF cookies via Playwright (cached for 10 min) and merges
+        them into a Cookie header alongside the standard auth headers.
+        """
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Origin": "https://sora.chatgpt.com",
+            "Referer": "https://sora.chatgpt.com/",
+        }
+
+        cf_result = await cf_cookie_manager.get_cookies(proxy_url)
+        if cf_result:
+            cookies_dict, ua = cf_result
+            # Build Cookie header string
+            cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+            headers["Cookie"] = cookie_str
+            headers["User-Agent"] = ua
+            print(f"[CF] Injected CF cookies into request headers")
+
+        return headers
+
+    async def _request_with_cf_retry(
+        self,
+        method: str,
+        url: str,
+        access_token: str,
+        proxy_url: Optional[str] = None,
+        json_data: Optional[dict] = None,
+    ):
+        """Make a request with automatic CF cookie injection and retry on 403.
+
+        On first 403, invalidates CF cookie cache, fetches fresh cookies
+        via Playwright, and retries once.
+        """
+        headers = await self._build_cf_headers(access_token, proxy_url)
+
+        kwargs = {
+            "headers": headers,
+            "timeout": 30,
+            "impersonate": "chrome",
+        }
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        if json_data is not None:
+            kwargs["json"] = json_data
+
+        async with AsyncSession() as session:
+            if method == "GET":
+                response = await session.get(url, **kwargs)
+            else:
+                response = await session.post(url, **kwargs)
+
+        # If 403, try to refresh CF cookies and retry once
+        if response.status_code == 403:
+            print(f"[CF] Got 403 from {url}, refreshing CF cookies and retrying...")
+            cf_cookie_manager.invalidate(proxy_url)
+            cf_result = await cf_cookie_manager.get_cookies(proxy_url, force_refresh=True)
+            if cf_result:
+                cookies_dict, ua = cf_result
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+                headers["Cookie"] = cookie_str
+                headers["User-Agent"] = ua
+
+                kwargs["headers"] = headers
+                async with AsyncSession() as session:
+                    if method == "GET":
+                        response = await session.get(url, **kwargs)
+                    else:
+                        response = await session.post(url, **kwargs)
+                print(f"[CF] Retry response status: {response.status_code}")
+            else:
+                print(f"[CF] Failed to obtain CF cookies for retry")
+
+        return response
+
     async def get_user_info(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get user info from Sora API"""
         proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
-        async with AsyncSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "Origin": "https://sora.chatgpt.com",
-                "Referer": "https://sora.chatgpt.com/"
-            }
+        response = await self._request_with_cf_retry(
+            "GET",
+            f"{config.sora_base_url}/me",
+            access_token,
+            proxy_url,
+        )
 
-            kwargs = {
-                "headers": headers,
-                "timeout": 30,
-                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
-            }
+        if response.status_code != 200:
+            # Check for token_invalidated error
+            if response.status_code == 401:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "")
+                    if error_code == "token_invalidated":
+                        raise ValueError(f"401 token_invalidated: Token has been invalidated")
+                except (ValueError, KeyError):
+                    pass
+            raise ValueError(f"Failed to get user info: {response.status_code}")
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-
-            response = await session.get(
-                f"{config.sora_base_url}/me",
-                **kwargs
-            )
-
-            if response.status_code != 200:
-                # Check for token_invalidated error
-                if response.status_code == 401:
-                    try:
-                        error_data = response.json()
-                        error_code = error_data.get("error", {}).get("code", "")
-                        if error_code == "token_invalidated":
-                            raise ValueError(f"401 token_invalidated: Token has been invalidated")
-                    except (ValueError, KeyError):
-                        pass
-                raise ValueError(f"Failed to get user info: {response.status_code}")
-
-            return response.json()
+        return response.json()
 
     async def get_subscription_info(self, token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> Dict[str, Any]:
         """Get subscription information from Sora API
@@ -112,65 +176,53 @@ class TokenManager:
         print(f"🔍 开始获取订阅信息...")
         proxy_url = await self.proxy_manager.get_proxy_url(token_id, proxy_url)
 
-        headers = {
-            "Authorization": f"Bearer {token}"
-        }
+        url = "https://sora.chatgpt.com/backend/billing/subscriptions"
+        print(f"📡 请求 URL: {url}")
+        print(f"🔑 使用 Token: {token[:30]}...")
 
-        async with AsyncSession() as session:
-            url = "https://sora.chatgpt.com/backend/billing/subscriptions"
-            print(f"📡 请求 URL: {url}")
-            print(f"🔑 使用 Token: {token[:30]}...")
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
 
-            kwargs = {
-                "headers": headers,
-                "timeout": 30,
-                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
-            }
+        response = await self._request_with_cf_retry("GET", url, token, proxy_url)
+        print(f"📥 响应状态码: {response.status_code}")
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"📦 响应数据: {data}")
 
-            response = await session.get(url, **kwargs)
-            print(f"📥 响应状态码: {response.status_code}")
+            # 提取第一个订阅信息
+            if data.get("data") and len(data["data"]) > 0:
+                subscription = data["data"][0]
+                plan = subscription.get("plan", {})
 
-            if response.status_code == 200:
-                data = response.json()
-                print(f"📦 响应数据: {data}")
-
-                # 提取第一个订阅信息
-                if data.get("data") and len(data["data"]) > 0:
-                    subscription = data["data"][0]
-                    plan = subscription.get("plan", {})
-
-                    result = {
-                        "plan_type": plan.get("id", ""),
-                        "plan_title": plan.get("title", ""),
-                        "subscription_end": subscription.get("end_ts", "")
-                    }
-                    print(f"✅ 订阅信息提取成功: {result}")
-                    return result
-
-                print(f"⚠️  响应数据中没有订阅信息")
-                return {
-                    "plan_type": "",
-                    "plan_title": "",
-                    "subscription_end": ""
+                result = {
+                    "plan_type": plan.get("id", ""),
+                    "plan_title": plan.get("title", ""),
+                    "subscription_end": subscription.get("end_ts", "")
                 }
-            else:
-                print(f"❌ Failed to get subscription info: {response.status_code}")
-                print(f"📄 响应内容: {response.text}")
+                print(f"✅ 订阅信息提取成功: {result}")
+                return result
 
-                # Check for token_expired error
-                try:
-                    error_data = response.json()
-                    error_info = error_data.get("error", {})
-                    if error_info.get("code") == "token_expired":
-                        raise Exception(f"Token已过期: {error_info.get('message', 'Token expired')}")
-                except ValueError:
-                    pass
+            print(f"⚠️  响应数据中没有订阅信息")
+            return {
+                "plan_type": "",
+                "plan_title": "",
+                "subscription_end": ""
+            }
+        else:
+            print(f"❌ Failed to get subscription info: {response.status_code}")
+            print(f"📄 响应内容: {response.text}")
 
-                raise Exception(f"Failed to get subscription info: {response.status_code}")
+            # Check for token_expired error
+            try:
+                error_data = response.json()
+                error_info = error_data.get("error", {})
+                if error_info.get("code") == "token_expired":
+                    raise Exception(f"Token已过期: {error_info.get('message', 'Token expired')}")
+            except ValueError:
+                pass
+
+            raise Exception(f"Failed to get subscription info: {response.status_code}")
 
     async def get_sora2_invite_code(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get Sora2 invite code"""
@@ -178,99 +230,92 @@ class TokenManager:
 
         print(f"🔍 开始获取Sora2邀请码...")
 
-        async with AsyncSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json"
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
+
+        response = await self._request_with_cf_retry(
+            "GET",
+            "https://sora.chatgpt.com/backend/project_y/invite/mine",
+            access_token,
+            proxy_url,
+        )
+
+        print(f"📥 响应状态码: {response.status_code}")
+
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ Sora2邀请码获取成功: {data}")
+            return {
+                "supported": True,
+                "invite_code": data.get("invite_code"),
+                "redeemed_count": data.get("redeemed_count", 0),
+                "total_count": data.get("total_count", 0)
             }
+        else:
+            print(f"❌ 获取Sora2邀请码失败: {response.status_code}")
+            print(f"📄 响应内容: {response.text}")
 
-            kwargs = {
-                "headers": headers,
-                "timeout": 30,
-                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
-            }
+            # Check for specific errors
+            try:
+                error_data = response.json()
+                error_info = error_data.get("error", {})
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
+                # Check for unsupported_country_code
+                if error_info.get("code") == "unsupported_country_code":
+                    country = error_info.get("param", "未知")
+                    raise Exception(f"Sora在您的国家/地区不可用 ({country}): {error_info.get('message', '')}")
 
-            response = await session.get(
-                "https://sora.chatgpt.com/backend/project_y/invite/mine",
-                **kwargs
-            )
+                # Check if it's 401 unauthorized (token doesn't support Sora2)
+                if response.status_code == 401 and "Unauthorized" in error_info.get("message", ""):
+                    print(f"⚠️  Token不支持Sora2，尝试激活...")
 
-            print(f"📥 响应状态码: {response.status_code}")
+                    # Try to activate Sora2
+                    try:
+                        activate_response = await self._request_with_cf_retry(
+                            "GET",
+                            "https://sora.chatgpt.com/backend/m/bootstrap",
+                            access_token,
+                            proxy_url,
+                        )
 
-            if response.status_code == 200:
-                data = response.json()
-                print(f"✅ Sora2邀请码获取成功: {data}")
-                return {
-                    "supported": True,
-                    "invite_code": data.get("invite_code"),
-                    "redeemed_count": data.get("redeemed_count", 0),
-                    "total_count": data.get("total_count", 0)
-                }
-            else:
-                print(f"❌ 获取Sora2邀请码失败: {response.status_code}")
-                print(f"📄 响应内容: {response.text}")
+                        if activate_response.status_code == 200:
+                            print(f"✅ Sora2激活请求成功，重新获取邀请码...")
 
-                # Check for specific errors
-                try:
-                    error_data = response.json()
-                    error_info = error_data.get("error", {})
-
-                    # Check for unsupported_country_code
-                    if error_info.get("code") == "unsupported_country_code":
-                        country = error_info.get("param", "未知")
-                        raise Exception(f"Sora在您的国家/地区不可用 ({country}): {error_info.get('message', '')}")
-
-                    # Check if it's 401 unauthorized (token doesn't support Sora2)
-                    if response.status_code == 401 and "Unauthorized" in error_info.get("message", ""):
-                        print(f"⚠️  Token不支持Sora2，尝试激活...")
-
-                        # Try to activate Sora2
-                        try:
-                            activate_response = await session.get(
-                                "https://sora.chatgpt.com/backend/m/bootstrap",
-                                **kwargs
+                            # Retry getting invite code
+                            retry_response = await self._request_with_cf_retry(
+                                "GET",
+                                "https://sora.chatgpt.com/backend/project_y/invite/mine",
+                                access_token,
+                                proxy_url,
                             )
 
-                            if activate_response.status_code == 200:
-                                print(f"✅ Sora2激活请求成功，重新获取邀请码...")
-
-                                # Retry getting invite code
-                                retry_response = await session.get(
-                                    "https://sora.chatgpt.com/backend/project_y/invite/mine",
-                                    **kwargs
-                                )
-
-                                if retry_response.status_code == 200:
-                                    retry_data = retry_response.json()
-                                    print(f"✅ Sora2激活成功！邀请码: {retry_data}")
-                                    return {
-                                        "supported": True,
-                                        "invite_code": retry_data.get("invite_code"),
-                                        "redeemed_count": retry_data.get("redeemed_count", 0),
-                                        "total_count": retry_data.get("total_count", 0)
-                                    }
-                                else:
-                                    print(f"⚠️  激活后仍无法获取邀请码: {retry_response.status_code}")
+                            if retry_response.status_code == 200:
+                                retry_data = retry_response.json()
+                                print(f"✅ Sora2激活成功！邀请码: {retry_data}")
+                                return {
+                                    "supported": True,
+                                    "invite_code": retry_data.get("invite_code"),
+                                    "redeemed_count": retry_data.get("redeemed_count", 0),
+                                    "total_count": retry_data.get("total_count", 0)
+                                }
                             else:
-                                print(f"⚠️  Sora2激活失败: {activate_response.status_code}")
-                        except Exception as activate_e:
-                            print(f"⚠️  Sora2激活过程出错: {activate_e}")
+                                print(f"⚠️  激活后仍无法获取邀请码: {retry_response.status_code}")
+                        else:
+                            print(f"⚠️  Sora2激活失败: {activate_response.status_code}")
+                    except Exception as activate_e:
+                        print(f"⚠️  Sora2激活过程出错: {activate_e}")
 
-                        return {
-                            "supported": False,
-                            "invite_code": None
-                        }
-                except ValueError:
-                    pass
+                    return {
+                        "supported": False,
+                        "invite_code": None
+                    }
+            except ValueError:
+                pass
 
-                return {
-                    "supported": False,
-                    "invite_code": None
-                }
+            return {
+                "supported": False,
+                "invite_code": None
+            }
 
     async def get_sora2_remaining_count(self, access_token: str, token_id: Optional[int] = None, proxy_url: Optional[str] = None) -> dict:
         """Get Sora2 remaining video count
@@ -286,49 +331,37 @@ class TokenManager:
 
         print(f"🔍 开始获取Sora2剩余次数...")
 
-        async with AsyncSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "User-Agent" : "Sora/1.2026.007 (Android 15; 24122RKC7C; build 2600700)"
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
+
+        response = await self._request_with_cf_retry(
+            "GET",
+            "https://sora.chatgpt.com/backend/nf/check",
+            access_token,
+            proxy_url,
+        )
+
+        print(f"📥 响应状态码: {response.status_code}")
+
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ Sora2剩余次数获取成功: {data}")
+
+            rate_limit_info = data.get("rate_limit_and_credit_balance", {})
+            return {
+                "success": True,
+                "remaining_count": rate_limit_info.get("estimated_num_videos_remaining", 0),
+                "rate_limit_reached": rate_limit_info.get("rate_limit_reached", False),
+                "access_resets_in_seconds": rate_limit_info.get("access_resets_in_seconds", 0)
             }
-
-            kwargs = {
-                "headers": headers,
-                "timeout": 30,
-                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
+        else:
+            print(f"❌ 获取Sora2剩余次数失败: {response.status_code}")
+            print(f"📄 响应内容: {response.text[:500]}")
+            return {
+                "success": False,
+                "remaining_count": 0,
+                "error": f"Failed to get remaining count: {response.status_code}"
             }
-
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
-
-            response = await session.get(
-                "https://sora.chatgpt.com/backend/nf/check",
-                **kwargs
-            )
-
-            print(f"📥 响应状态码: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                print(f"✅ Sora2剩余次数获取成功: {data}")
-
-                rate_limit_info = data.get("rate_limit_and_credit_balance", {})
-                return {
-                    "success": True,
-                    "remaining_count": rate_limit_info.get("estimated_num_videos_remaining", 0),
-                    "rate_limit_reached": rate_limit_info.get("rate_limit_reached", False),
-                    "access_resets_in_seconds": rate_limit_info.get("access_resets_in_seconds", 0)
-                }
-            else:
-                print(f"❌ 获取Sora2剩余次数失败: {response.status_code}")
-                print(f"📄 响应内容: {response.text[:500]}")
-                return {
-                    "success": False,
-                    "remaining_count": 0,
-                    "error": f"Failed to get remaining count: {response.status_code}"
-                }
 
     async def check_username_available(self, access_token: str, username: str) -> bool:
         """Check if username is available
@@ -344,39 +377,28 @@ class TokenManager:
 
         print(f"🔍 检查用户名是否可用: {username}")
 
-        async with AsyncSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json"
-            }
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
 
-            kwargs = {
-                "headers": headers,
-                "json": {"username": username},
-                "timeout": 30,
-                "impersonate": "chrome"
-            }
+        response = await self._request_with_cf_retry(
+            "POST",
+            "https://sora.chatgpt.com/backend/project_y/profile/username/check",
+            access_token,
+            proxy_url,
+            json_data={"username": username},
+        )
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
+        print(f"📥 响应状态码: {response.status_code}")
 
-            response = await session.post(
-                "https://sora.chatgpt.com/backend/project_y/profile/username/check",
-                **kwargs
-            )
-
-            print(f"📥 响应状态码: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                available = data.get("available", False)
-                print(f"✅ 用户名检查结果: available={available}")
-                return available
-            else:
-                print(f"❌ 用户名检查失败: {response.status_code}")
-                print(f"📄 响应内容: {response.text[:500]}")
-                return False
+        if response.status_code == 200:
+            data = response.json()
+            available = data.get("available", False)
+            print(f"✅ 用户名检查结果: available={available}")
+            return available
+        else:
+            print(f"❌ 用户名检查失败: {response.status_code}")
+            print(f"📄 响应内容: {response.text[:500]}")
+            return False
 
     async def set_username(self, access_token: str, username: str) -> dict:
         """Set username for the account
@@ -392,38 +414,27 @@ class TokenManager:
 
         print(f"🔍 开始设置用户名: {username}")
 
-        async with AsyncSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json"
-            }
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
 
-            kwargs = {
-                "headers": headers,
-                "json": {"username": username},
-                "timeout": 30,
-                "impersonate": "chrome"
-            }
+        response = await self._request_with_cf_retry(
+            "POST",
+            "https://sora.chatgpt.com/backend/project_y/profile/username/set",
+            access_token,
+            proxy_url,
+            json_data={"username": username},
+        )
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
+        print(f"📥 响应状态码: {response.status_code}")
 
-            response = await session.post(
-                "https://sora.chatgpt.com/backend/project_y/profile/username/set",
-                **kwargs
-            )
-
-            print(f"📥 响应状态码: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                print(f"✅ 用户名设置成功: {data.get('username')}")
-                return data
-            else:
-                print(f"❌ 用户名设置失败: {response.status_code}")
-                print(f"📄 响应内容: {response.text[:500]}")
-                raise Exception(f"Failed to set username: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ 用户名设置成功: {data.get('username')}")
+            return data
+        else:
+            print(f"❌ 用户名设置失败: {response.status_code}")
+            print(f"📄 响应内容: {response.text[:500]}")
+            raise Exception(f"Failed to set username: {response.status_code}")
 
     async def activate_sora2_invite(self, access_token: str, invite_code: str) -> dict:
         """Activate Sora2 with invite code"""
@@ -433,128 +444,175 @@ class TokenManager:
         print(f"🔍 开始激活Sora2邀请码: {invite_code}")
         print(f"🔑 Access Token 前缀: {access_token[:50]}...")
 
+        # 生成设备ID
+        device_id = str(uuid.uuid4())
+        print(f"🆔 设备ID: {device_id}")
+        print(f"📦 请求体: {{'invite_code': '{invite_code}'}}")
+
+        if proxy_url:
+            print(f"🌐 使用代理: {proxy_url}")
+
+        # Build headers with CF cookies
+        headers = await self._build_cf_headers(access_token, proxy_url)
+        # Merge oai-did into Cookie header
+        existing_cookie = headers.get("Cookie", "")
+        if existing_cookie:
+            headers["Cookie"] = f"{existing_cookie}; oai-did={device_id}"
+        else:
+            headers["Cookie"] = f"oai-did={device_id}"
+
+        kwargs = {
+            "headers": headers,
+            "json": {"invite_code": invite_code},
+            "timeout": 30,
+            "impersonate": "chrome120",
+        }
+
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+
         async with AsyncSession() as session:
-            # 生成设备ID
-            device_id = str(uuid.uuid4())
-
-            # 只设置必要的头，让 impersonate 处理其他
-            headers = {
-                "authorization": f"Bearer {access_token}",
-                "cookie": f"oai-did={device_id}"
-            }
-
-            print(f"🆔 设备ID: {device_id}")
-            print(f"📦 请求体: {{'invite_code': '{invite_code}'}}")
-
-            kwargs = {
-                "headers": headers,
-                "json": {"invite_code": invite_code},
-                "timeout": 30,
-                "impersonate": "chrome120"  # 使用 chrome120 让库自动处理 UA 等头
-            }
-
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                print(f"🌐 使用代理: {proxy_url}")
-
             response = await session.post(
                 "https://sora.chatgpt.com/backend/project_y/invite/accept",
                 **kwargs
             )
 
-            print(f"📥 响应状态码: {response.status_code}")
+        # Retry on 403
+        if response.status_code == 403:
+            print(f"[CF] Got 403 on invite/accept, refreshing CF cookies and retrying...")
+            cf_cookie_manager.invalidate(proxy_url)
+            cf_result = await cf_cookie_manager.get_cookies(proxy_url, force_refresh=True)
+            if cf_result:
+                cookies_dict, ua = cf_result
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+                headers["Cookie"] = cookie_str + f"; oai-did={device_id}"
+                headers["User-Agent"] = ua
+                kwargs["headers"] = headers
+                async with AsyncSession() as session:
+                    response = await session.post(
+                        "https://sora.chatgpt.com/backend/project_y/invite/accept",
+                        **kwargs
+                    )
 
-            if response.status_code == 200:
-                data = response.json()
-                print(f"✅ Sora2激活成功: {data}")
-                return {
-                    "success": data.get("success", False),
-                    "already_accepted": data.get("already_accepted", False)
-                }
-            else:
-                print(f"❌ Sora2激活失败: {response.status_code}")
-                print(f"📄 响应内容: {response.text[:500]}")
-                raise Exception(f"Failed to activate Sora2: {response.status_code}")
+        print(f"📥 响应状态码: {response.status_code}")
+
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ Sora2激活成功: {data}")
+            return {
+                "success": data.get("success", False),
+                "already_accepted": data.get("already_accepted", False)
+            }
+        else:
+            print(f"❌ Sora2激活失败: {response.status_code}")
+            print(f"📄 响应内容: {response.text[:500]}")
+            raise Exception(f"Failed to activate Sora2: {response.status_code}")
 
     async def st_to_at(self, session_token: str, proxy_url: Optional[str] = None) -> dict:
         """Convert Session Token to Access Token"""
         debug_logger.log_info(f"[ST_TO_AT] 开始转换 Session Token 为 Access Token...")
         proxy_url = await self.proxy_manager.get_proxy_url(proxy_url=proxy_url)
 
-        async with AsyncSession() as session:
-            headers = {
-                "Cookie": f"__Secure-next-auth.session-token={session_token}",
-                "Accept": "application/json",
-                "Origin": "https://sora.chatgpt.com",
-                "Referer": "https://sora.chatgpt.com/"
-            }
+        # Build headers with CF cookies
+        headers = {
+            "Cookie": f"__Secure-next-auth.session-token={session_token}",
+            "Accept": "application/json",
+            "Origin": "https://sora.chatgpt.com",
+            "Referer": "https://sora.chatgpt.com/"
+        }
 
-            kwargs = {
-                "headers": headers,
-                "timeout": 30,
-                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
-            }
+        # Inject CF cookies
+        cf_result = await cf_cookie_manager.get_cookies(proxy_url)
+        if cf_result:
+            cookies_dict, ua = cf_result
+            # Merge CF cookies with session token cookie
+            cf_cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+            headers["Cookie"] = headers["Cookie"] + "; " + cf_cookie_str
+            headers["User-Agent"] = ua
+            print(f"[CF] Injected CF cookies into ST_TO_AT request")
 
-            if proxy_url:
-                kwargs["proxy"] = proxy_url
-                debug_logger.log_info(f"[ST_TO_AT] 使用代理: {proxy_url}")
+        kwargs = {
+            "headers": headers,
+            "timeout": 30,
+            "impersonate": "chrome",
+        }
 
-            url = "https://sora.chatgpt.com/api/auth/session"
-            debug_logger.log_info(f"[ST_TO_AT] 📡 请求 URL: {url}")
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+            debug_logger.log_info(f"[ST_TO_AT] 使用代理: {proxy_url}")
+
+        url = "https://sora.chatgpt.com/api/auth/session"
+        debug_logger.log_info(f"[ST_TO_AT] 📡 请求 URL: {url}")
+
+        try:
+            async with AsyncSession() as session:
+                response = await session.get(url, **kwargs)
+
+            # Retry on 403
+            if response.status_code == 403:
+                debug_logger.log_info(f"[ST_TO_AT] Got 403, refreshing CF cookies and retrying...")
+                cf_cookie_manager.invalidate(proxy_url)
+                cf_result = await cf_cookie_manager.get_cookies(proxy_url, force_refresh=True)
+                if cf_result:
+                    cookies_dict, ua = cf_result
+                    cf_cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+                    headers["Cookie"] = f"__Secure-next-auth.session-token={session_token}; {cf_cookie_str}"
+                    headers["User-Agent"] = ua
+                    kwargs["headers"] = headers
+                    async with AsyncSession() as session_retry:
+                        response = await session_retry.get(url, **kwargs)
+
+            debug_logger.log_info(f"[ST_TO_AT] 📥 响应状态码: {response.status_code}")
+
+            if response.status_code != 200:
+                error_msg = f"Failed to convert ST to AT: {response.status_code}"
+                debug_logger.log_info(f"[ST_TO_AT] ❌ {error_msg}")
+                debug_logger.log_info(f"[ST_TO_AT] 响应内容: {response.text[:500]}")
+                raise ValueError(error_msg)
+
+            # 获取响应文本用于调试
+            response_text = response.text
+            debug_logger.log_info(f"[ST_TO_AT] 📄 响应内容: {response_text[:500]}")
+
+            # 检查响应是否为空
+            if not response_text or response_text.strip() == "":
+                debug_logger.log_info(f"[ST_TO_AT] ❌ 响应体为空")
+                raise ValueError("Response body is empty")
 
             try:
-                response = await session.get(url, **kwargs)
-                debug_logger.log_info(f"[ST_TO_AT] 📥 响应状态码: {response.status_code}")
+                data = response.json()
+            except Exception as json_err:
+                debug_logger.log_info(f"[ST_TO_AT] ❌ JSON解析失败: {str(json_err)}")
+                debug_logger.log_info(f"[ST_TO_AT] 原始响应: {response_text[:1000]}")
+                raise ValueError(f"Failed to parse JSON response: {str(json_err)}")
 
-                if response.status_code != 200:
-                    error_msg = f"Failed to convert ST to AT: {response.status_code}"
-                    debug_logger.log_info(f"[ST_TO_AT] ❌ {error_msg}")
-                    debug_logger.log_info(f"[ST_TO_AT] 响应内容: {response.text[:500]}")
-                    raise ValueError(error_msg)
+            # 检查data是否为None
+            if data is None:
+                debug_logger.log_info(f"[ST_TO_AT] ❌ 响应JSON为空")
+                raise ValueError("Response JSON is empty")
 
-                # 获取响应文本用于调试
-                response_text = response.text
-                debug_logger.log_info(f"[ST_TO_AT] 📄 响应内容: {response_text[:500]}")
+            access_token = data.get("accessToken")
+            email = data.get("user", {}).get("email") if data.get("user") else None
+            expires = data.get("expires")
 
-                # 检查响应是否为空
-                if not response_text or response_text.strip() == "":
-                    debug_logger.log_info(f"[ST_TO_AT] ❌ 响应体为空")
-                    raise ValueError("Response body is empty")
+            # 检查必要字段
+            if not access_token:
+                debug_logger.log_info(f"[ST_TO_AT] ❌ 响应中缺少 accessToken 字段")
+                debug_logger.log_info(f"[ST_TO_AT] 响应数据: {data}")
+                raise ValueError("Missing accessToken in response")
 
-                try:
-                    data = response.json()
-                except Exception as json_err:
-                    debug_logger.log_info(f"[ST_TO_AT] ❌ JSON解析失败: {str(json_err)}")
-                    debug_logger.log_info(f"[ST_TO_AT] 原始响应: {response_text[:1000]}")
-                    raise ValueError(f"Failed to parse JSON response: {str(json_err)}")
+            debug_logger.log_info(f"[ST_TO_AT] ✅ ST 转换成功")
+            debug_logger.log_info(f"  - Email: {email}")
+            debug_logger.log_info(f"  - 过期时间: {expires}")
 
-                # 检查data是否为None
-                if data is None:
-                    debug_logger.log_info(f"[ST_TO_AT] ❌ 响应JSON为空")
-                    raise ValueError("Response JSON is empty")
-
-                access_token = data.get("accessToken")
-                email = data.get("user", {}).get("email") if data.get("user") else None
-                expires = data.get("expires")
-
-                # 检查必要字段
-                if not access_token:
-                    debug_logger.log_info(f"[ST_TO_AT] ❌ 响应中缺少 accessToken 字段")
-                    debug_logger.log_info(f"[ST_TO_AT] 响应数据: {data}")
-                    raise ValueError("Missing accessToken in response")
-
-                debug_logger.log_info(f"[ST_TO_AT] ✅ ST 转换成功")
-                debug_logger.log_info(f"  - Email: {email}")
-                debug_logger.log_info(f"  - 过期时间: {expires}")
-
-                return {
-                    "access_token": access_token,
-                    "email": email,
-                    "expires": expires
-                }
-            except Exception as e:
-                debug_logger.log_info(f"[ST_TO_AT] 🔴 异常: {str(e)}")
-                raise
+            return {
+                "access_token": access_token,
+                "email": email,
+                "expires": expires
+            }
+        except Exception as e:
+            debug_logger.log_info(f"[ST_TO_AT] 🔴 异常: {str(e)}")
+            raise
     
     async def rt_to_at(self, refresh_token: str, client_id: Optional[str] = None, proxy_url: Optional[str] = None) -> dict:
         """Convert Refresh Token to Access Token
