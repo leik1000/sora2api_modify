@@ -95,20 +95,38 @@ class CfCookieManager:
                 return None
 
     @staticmethod
-    def _normalize_proxy_url(proxy_url: Optional[str]) -> Optional[str]:
-        """Normalize proxy URL for Playwright/Chromium compatibility.
+    def _parse_proxy_for_playwright(proxy_url: Optional[str]) -> Optional[Dict[str, str]]:
+        """Parse proxy URL into Playwright proxy config dict.
 
-        Chromium only supports socks5://, not socks5h://.
-        socks5h means 'SOCKS5 with remote DNS resolution' — Chromium's
-        SOCKS5 implementation already does remote DNS by default, so we
-        can safely convert socks5h:// -> socks5://.
+        Playwright requires proxy credentials as separate fields, not
+        embedded in the URL.  Also converts socks5h:// -> socks5://.
+
+        Input:  socks5h://user:pass@host:port
+        Output: {"server": "socks5://host:port", "username": "user", "password": "pass"}
         """
         if not proxy_url:
-            return proxy_url
-        # socks5h -> socks5 (Chromium does remote DNS by default for SOCKS5)
-        if proxy_url.startswith("socks5h://"):
-            return "socks5://" + proxy_url[len("socks5h://"):]
-        return proxy_url
+            return None
+
+        from urllib.parse import urlparse, unquote
+
+        # socks5h -> socks5
+        normalized = proxy_url
+        if normalized.startswith("socks5h://"):
+            normalized = "socks5://" + normalized[len("socks5h://"):]
+
+        parsed = urlparse(normalized)
+        # Rebuild server URL without credentials
+        server = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            server += f":{parsed.port}"
+
+        result: Dict[str, str] = {"server": server}
+        if parsed.username:
+            result["username"] = unquote(parsed.username)
+        if parsed.password:
+            result["password"] = unquote(parsed.password)
+
+        return result
 
     async def _fetch_cookies_via_browser(
         self, proxy_url: Optional[str] = None
@@ -117,8 +135,8 @@ class CfCookieManager:
         challenge to resolve, and extract cookies."""
         pw = None
         browser = None
-        # Normalize proxy URL for Chromium compatibility
-        browser_proxy = self._normalize_proxy_url(proxy_url)
+        # Parse proxy URL into Playwright-compatible format
+        proxy_config = self._parse_proxy_for_playwright(proxy_url)
         try:
             pw = await async_playwright().start()
 
@@ -131,8 +149,9 @@ class CfCookieManager:
                     "--disable-gpu",
                 ],
             }
-            if browser_proxy:
-                launch_args["proxy"] = {"server": browser_proxy}
+            if proxy_config:
+                launch_args["proxy"] = proxy_config
+                print(f"[CF Cookie] Playwright proxy: server={proxy_config['server']}, has_auth={'username' in proxy_config}")
 
             browser = await pw.chromium.launch(**launch_args)
             context = await browser.new_context(
