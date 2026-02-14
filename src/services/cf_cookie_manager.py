@@ -147,6 +147,7 @@ class CfCookieManager:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
                 ],
             }
             if proxy_config:
@@ -157,7 +158,18 @@ class CfCookieManager:
             context = await browser.new_context(
                 user_agent=_DEFAULT_UA,
                 viewport={"width": 1280, "height": 720},
+                locale="en-US",
+                timezone_id="America/New_York",
             )
+
+            # Hide webdriver property to bypass CF bot detection
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                window.chrome = { runtime: {} };
+            """)
+
             page = await context.new_page()
 
             print("[CF Cookie] Navigating to sora.chatgpt.com ...")
