@@ -4,6 +4,7 @@ Uses Playwright to solve CF managed challenges and caches the resulting
 cookies (cf_clearance, etc.) for reuse by curl_cffi requests.
 """
 import asyncio
+import re
 import time
 from typing import Optional, Dict, Tuple
 
@@ -93,6 +94,22 @@ class CfCookieManager:
                 print(f"[CF Cookie] Failed to obtain CF cookies")
                 return None
 
+    @staticmethod
+    def _normalize_proxy_url(proxy_url: Optional[str]) -> Optional[str]:
+        """Normalize proxy URL for Playwright/Chromium compatibility.
+
+        Chromium only supports socks5://, not socks5h://.
+        socks5h means 'SOCKS5 with remote DNS resolution' — Chromium's
+        SOCKS5 implementation already does remote DNS by default, so we
+        can safely convert socks5h:// -> socks5://.
+        """
+        if not proxy_url:
+            return proxy_url
+        # socks5h -> socks5 (Chromium does remote DNS by default for SOCKS5)
+        if proxy_url.startswith("socks5h://"):
+            return "socks5://" + proxy_url[len("socks5h://"):]
+        return proxy_url
+
     async def _fetch_cookies_via_browser(
         self, proxy_url: Optional[str] = None
     ) -> Optional[Tuple[Dict[str, str], str]]:
@@ -100,6 +117,8 @@ class CfCookieManager:
         challenge to resolve, and extract cookies."""
         pw = None
         browser = None
+        # Normalize proxy URL for Chromium compatibility
+        browser_proxy = self._normalize_proxy_url(proxy_url)
         try:
             pw = await async_playwright().start()
 
@@ -112,8 +131,8 @@ class CfCookieManager:
                     "--disable-gpu",
                 ],
             }
-            if proxy_url:
-                launch_args["proxy"] = {"server": proxy_url}
+            if browser_proxy:
+                launch_args["proxy"] = {"server": browser_proxy}
 
             browser = await pw.chromium.launch(**launch_args)
             context = await browser.new_context(
