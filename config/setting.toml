@@ -1,7 +1,7 @@
 [global]
-api_key = "han1234"
-admin_username = "admin"
-admin_password = "admin"
+api_key = "leilei123go"
+admin_username = "leik1000"
+admin_password = "leilei123go"
 
 [sora]
 base_url = "https://sora.chatgpt.com/backend"
@@ -38,13 +38,13 @@ task_max_retries = 3
 auto_disable_on_401 = true
 
 [proxy]
-proxy_enabled = false
-proxy_url = ""
+proxy_enabled = true
+proxy_url = "socks5h://user-sp5kyg8ohs-ip-66.227.126.179:mVzXPf+93xf2ptpK0g@isp.decodo.com:10001"
 
 [watermark_free]
-watermark_free_enabled = false
+watermark_free_enabled = true
 parse_method = "third_party"
-custom_parse_url = ""
+custom_parse_url = "https://api.sorai.me/"
 custom_parse_token = ""
 fallback_on_failure = true  # Auto fallback to watermarked video on failure
 
@@ -63,12 +63,12 @@ timezone_offset = 8
 [pow_service]
 # beta测试，目前仍处于测试阶段
 # POW 计算模式：local（本地计算）或 external（外部服务）
-mode = "external"
+mode = "local"
 # 外部 POW 服务地址（仅在 external 模式下使用）
 server_url = "http://localhost:8002"
 # 外部 POW 服务访问密钥（仅在 external 模式下使用）
 api_key = "your-secure-api-key-here"
 # POW 代理配置
-proxy_enabled = false
-proxy_url = ""
+proxy_enabled = true
+proxy_url = "https://gen.nodai.design/v1/pow"
 
